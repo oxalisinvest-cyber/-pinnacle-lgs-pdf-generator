@@ -441,7 +441,7 @@ def build_pdf(data, out, fn=""):
         "Prices are FOB Taiwan.",
         "Air tickets, accommodation, meals and local transportation for commissioning must be covered by the customer.",
         f"This quotation is valid for {data['validity']} from the date of issue.",
-        "Lead time: 3 to 4 months after first deposit (excluding shipment).",
+        f"Lead time: {data['lead_time']} after first deposit (excluding shipment).",
         "Hitachi Printer: CBS (Cross Border Sales) agreement with local Hitachi dealer is mandatory.",
         "Please refer to the attached Sales Conditions document for full terms and conditions.",
     ]:
