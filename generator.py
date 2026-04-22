@@ -59,6 +59,61 @@ def get_gradient_png():
     return _GRADIENT_PATH
 
 
+
+# ============================================================
+# LEAD TIMES (source : Template_proforma_202410_En.xlsx)
+# Lead time = max parmi toutes les machines demandées
+# ============================================================
+LEADTIME_MAP = {
+    "X1":     "3 to 4 months",
+    "X1_18":  "3 to 4 months",
+    "X1_16":  "3 to 4 months",
+    "X1_20":  "3 to 4 months",
+    "X2":     "3 to 4 months",
+    "X2_12":  "3 to 4 months",
+    "X2_16":  "3 to 4 months",
+    "X20":    "3 to 4 months",
+    "X30I":   "3 to 4 months",
+    "X3":     "3 to 4 months",
+    "X3I":    "3 to 4 months",
+    "X5":     "4 to 5 months",
+    "X8I":    "4 to 5 months",
+    "X80I":   "4 to 5 months",
+    "X6":     "6 to 7 months",
+    "X10I":   "6 to 7 months",
+    "X100I":  "6 to 7 months",
+    "X88":    "6 to 7 months",
+    "X88I":   "6 to 7 months",
+    "X888":   "8 to 10 months",
+    "X888I":  "8 to 10 months",
+    "X168":   "10 to 12 months",
+}
+
+LEADTIME_RANK = {
+    "3 to 4 months":  1,
+    "4 to 5 months":  2,
+    "6 to 7 months":  3,
+    "8 to 10 months": 4,
+    "10 to 12 months": 5,
+}
+
+def compute_lead_time(machines):
+    """Returns the maximum lead time among all machines in the quote"""
+    if not machines:
+        return "3 to 4 months"
+    best_lt = "3 to 4 months"
+    best_rank = 1
+    for m in machines:
+        code = (m.get("model") or "").upper()
+        lt = LEADTIME_MAP.get(code)
+        if lt:
+            r = LEADTIME_RANK.get(lt, 1)
+            if r > best_rank:
+                best_rank = r
+                best_lt = lt
+    return best_lt
+
+
 class QuoteDoc(BaseDocTemplate):
     def __init__(self, fn, quote_fn="", **kw):
         self.quote_fn = quote_fn
@@ -155,6 +210,9 @@ def inner_cb(canvas_obj, doc):
 
 
 def build_pdf(data, out, fn=""):
+    # Override lead_time with computed value based on machines
+    data = dict(data)
+    data["lead_time"] = compute_lead_time(data.get("machines", []))
     doc = QuoteDoc(out, quote_fn=fn or os.path.basename(out),
                    pagesize=A4,
                    topMargin=30*mm, bottomMargin=20*mm,
@@ -417,6 +475,9 @@ def build_pdf(data, out, fn=""):
 
 def build_excel(data, out):
     from openpyxl import Workbook
+    # Override lead_time with computed value based on machines
+    data = dict(data)
+    data["lead_time"] = compute_lead_time(data.get("machines", []))
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
     wb = Workbook()
