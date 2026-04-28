@@ -45,7 +45,7 @@ def generate_pdf():
         data = request.get_json(force=True)
         tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
         tmp.close()
-        build_pdf(data, tmp.name, os.path.basename(tmp.name))
+        build_pdf(data, tmp.name, data.get("filename", os.path.basename(tmp.name)))
         with open(tmp.name, "rb") as f:
             pdf_bytes = f.read()
         os.unlink(tmp.name)
