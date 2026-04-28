@@ -10,9 +10,18 @@ import io
 import base64
 import tempfile
 import json
-
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+from google.oauth2 import service_account
 from generator import build_pdf, build_excel
-
+def get_drive_service():
+    creds_json = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
+    creds_dict = json.loads(creds_json)
+    creds = service_account.Credentials.from_service_account_info(
+        creds_dict,
+        scopes=['https://www.googleapis.com/auth/drive.file']
+    )
+    return build('drive', 'v3', credentials=creds)
 app = Flask(__name__)
 
 # Static assets: logo, signature, photos
@@ -98,7 +107,40 @@ def generate_both():
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+@app.route('/generate-and-upload', methods=['POST'])
+def generate_and_upload():
+    try:
+        data = request.json
+        folder_id = data.get('folder_id')
+        filename  = data.get('filename', 'Proforma.pdf')
 
+        # Génération PDF (même logique qu'existant)
+        import tempfile
+        pdf_tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        pdf_tmp.close()
+        build_pdf(data, pdf_tmp.name)
+        with open(pdf_tmp.name, "rb") as f:
+            pdf_bytes = f.read()
+        os.unlink(pdf_tmp.name)
+
+        # Upload direct vers Drive
+        service = get_drive_service()
+        file_metadata = {'name': filename, 'parents': [folder_id]}
+        media = MediaIoBaseUpload(
+            io.BytesIO(pdf_bytes),
+            mimetype='application/pdf',
+            resumable=False
+        )
+        uploaded = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id'
+        ).execute()
+
+        return jsonify({'file_id': uploaded['id'], 'success': True})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
