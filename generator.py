@@ -79,12 +79,22 @@ def _normalize(data):
     """
     data = dict(data) if data else {}
 
-    # Top-level string fields
-    for k in ("reference", "date", "validity", "delivery_terms",
-              "sales_person", "document_type", "lead_time",
-              "discount_label", "filename", "filename_pdf", "filename_xlsx"):
-        if k in data:
-            data[k] = _to_str(data[k])
+    # Top-level string fields — always set with safe default (handles missing keys)
+    _string_defaults = {
+        "reference": "",
+        "date": "",
+        "validity": "30 days",
+        "delivery_terms": "FOB Taiwan",
+        "sales_person": "",
+        "document_type": "PROFORMA",
+        "lead_time": "3 to 4 months",
+        "discount_label": "",
+        "filename": "",
+        "filename_pdf": "",
+        "filename_xlsx": "",
+    }
+    for k, default in _string_defaults.items():
+        data[k] = _to_str(data.get(k, default))
 
     # Client block: every value must be a string
     if "client" in data and isinstance(data["client"], dict):
