@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PINNACLE LGS — PDF & Excel generator (V12)"""
+"""PINNACLE LGS — PDF & Excel generator (V13 - robust normalization)"""
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -38,6 +38,89 @@ R_MARGIN = 12*mm
 CW = W - L_MARGIN - R_MARGIN
 
 _GRADIENT_PATH = None
+
+
+# ============================================================
+# DATA NORMALIZATION (V13) — handles strings/ints/None/numbers
+# from JSON payload safely. This is the fix for the
+# "'int' object has no attribute 'split'" error caused by
+# numeric phone numbers and qty/price coming from Google Sheets.
+# ============================================================
+
+def _to_str(v):
+    """Convert any value to safe string for PDF text rendering."""
+    if v is None:
+        return ""
+    return str(v)
+
+def _to_int(v, default=0):
+    """Convert anything reasonable to int for arithmetic."""
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (int, float)):
+        return int(v)
+    try:
+        s = str(v).strip().replace(",", "").replace("$", "").replace(" ", "")
+        if s == "":
+            return default
+        return int(float(s))
+    except (ValueError, TypeError):
+        return default
+
+def _normalize(data):
+    """
+    Make a defensive copy of `data` with all fields coerced to the
+    types the rendering code expects.  String fields => str (incl. None -> "").
+    Numeric fields (qty, price, discount_pct) => int.
+    Lists of strings => list of str.
+    Safe to pass anything from JSON: phones-as-numbers, qty-as-strings, etc.
+    """
+    data = dict(data) if data else {}
+
+    # Top-level string fields
+    for k in ("reference", "date", "validity", "delivery_terms",
+              "sales_person", "document_type", "lead_time",
+              "discount_label", "filename", "filename_pdf", "filename_xlsx"):
+        if k in data:
+            data[k] = _to_str(data[k])
+
+    # Client block: every value must be a string
+    if "client" in data and isinstance(data["client"], dict):
+        data["client"] = {k: _to_str(v) for k, v in data["client"].items()}
+    else:
+        data["client"] = {"name": "", "company": "", "country": "",
+                          "email": "", "phone": ""}
+    # ensure required keys exist
+    for k in ("name", "company", "country", "email", "phone"):
+        data["client"].setdefault(k, "")
+
+    # discount_pct => int
+    data["discount_pct"] = _to_int(data.get("discount_pct", 0))
+
+    # Item lists: machines / software / commissioning
+    for key in ("machines", "software", "commissioning"):
+        items = data.get(key) or []
+        new_items = []
+        for it in items:
+            it = dict(it) if it else {}
+            it["qty"]   = _to_int(it.get("qty", 1), default=1)
+            it["price"] = _to_int(it.get("price", 0), default=0)
+            for sk in ("model", "desc", "spec"):
+                if sk in it:
+                    it[sk] = _to_str(it[sk])
+                else:
+                    it[sk] = ""
+            new_items.append(it)
+        data[key] = new_items
+
+    # included: list of strings
+    inc = data.get("included") or []
+    data["included"] = [_to_str(x) for x in inc]
+
+    return data
+
 
 def fmt(n):
     return f"${n:,.0f}" if not isinstance(n, str) else n
@@ -104,7 +187,7 @@ def compute_lead_time(machines):
     best_lt = "3 to 4 months"
     best_rank = 1
     for m in machines:
-        code = (m.get("model") or "").upper()
+        code = _to_str(m.get("model")).upper()
         lt = LEADTIME_MAP.get(code)
         if lt:
             r = LEADTIME_RANK.get(lt, 1)
@@ -148,7 +231,7 @@ def cover_cb(canvas_obj, doc):
     canvas_obj.setFont("Helvetica-Bold", 8.5)
     canvas_obj.drawString(L_MARGIN+4*mm, H*0.405+2.5*mm, "LIGHT GAUGE STEEL FRAMING SYSTEMS")
 
-    models = "  ·  ".join([m["model"] for m in d["machines"]])
+    models = "  \u00b7  ".join([m["model"] for m in d["machines"]])
     canvas_obj.setFillColor(colors.Color(1,1,1,alpha=0.15))
     canvas_obj.roundRect(L_MARGIN, H*0.35, W-L_MARGIN-R_MARGIN, 7*mm, 1*mm, fill=True, stroke=False)
     canvas_obj.setFillColor(ORANGE_MED)
@@ -177,7 +260,7 @@ def cover_cb(canvas_obj, doc):
     canvas_obj.setFillColor(WHITE)
     canvas_obj.setFont("Helvetica-Bold", 7.5)
     canvas_obj.drawString(L_MARGIN, 3.8*mm,
-        "Pinnacle LGS Inc.  ·  1636 240th Street, Harbor City, CA 90710, USA")
+        "Pinnacle LGS Inc.  \u00b7  1636 240th Street, Harbor City, CA 90710, USA")
     canvas_obj.drawRightString(W-R_MARGIN, 3.8*mm, "www.pinnaclelgs.com")
 
 
@@ -210,8 +293,9 @@ def inner_cb(canvas_obj, doc):
 
 
 def build_pdf(data, out, fn=""):
+    # ── V13: normalize all input data first (defensive against JSON quirks) ──
+    data = _normalize(data)
     # Override lead_time with computed value based on machines
-    data = dict(data)
     data["lead_time"] = compute_lead_time(data.get("machines", []))
     doc = QuoteDoc(out, quote_fn=fn or os.path.basename(out),
                    pagesize=A4,
@@ -475,8 +559,9 @@ def build_pdf(data, out, fn=""):
 
 def build_excel(data, out):
     from openpyxl import Workbook
+    # ── V13: normalize all input data first (defensive against JSON quirks) ──
+    data = _normalize(data)
     # Override lead_time with computed value based on machines
-    data = dict(data)
     data["lead_time"] = compute_lead_time(data.get("machines", []))
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
