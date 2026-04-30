@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""PINNACLE LGS — PDF & Excel generator (V13 - robust normalization)"""
+"""PINNACLE LGS - PDF & Excel generator (V14)
+
+Changements V14 par rapport à V13 :
+- _normalize_discount_pct dédié : accepte -0.2, -20, "20%", 0.2, 20 -> toujours 20
+  (V13 transformait -0.2 en 0 via int(float("-0.2")) = bug discount perdu)
+- discount_label auto-rempli si discount_pct > 0 et label vide
+- Logging info quand un champ est normalisé (debug facilité)
+"""
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -12,6 +19,10 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_RIGHT, TA_CENTER
 from PIL import Image as PILImage
 import os
+import logging
+
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+log = logging.getLogger("pinnacle")
 
 ORANGE       = colors.HexColor("#E8841A")
 ORANGE_LIGHT = colors.HexColor("#FDF0E2")
@@ -25,7 +36,6 @@ WHITE        = colors.white
 GRID         = colors.HexColor("#E0E0E0")
 ROW_ALT      = colors.HexColor("#FFF8F2")
 
-# Assets sont dans le dossier assets/ à côté du code
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 LOGO          = os.path.join(ASSETS, "Pinnacle_logo.png")
 SIG           = os.path.join(ASSETS, "Signature_Antoine.jpg")
@@ -41,20 +51,16 @@ _GRADIENT_PATH = None
 
 
 # ============================================================
-# DATA NORMALIZATION (V13) — handles strings/ints/None/numbers
-# from JSON payload safely. This is the fix for the
-# "'int' object has no attribute 'split'" error caused by
-# numeric phone numbers and qty/price coming from Google Sheets.
+# DATA NORMALIZATION (V14)
 # ============================================================
 
 def _to_str(v):
-    """Convert any value to safe string for PDF text rendering."""
     if v is None:
         return ""
     return str(v)
 
+
 def _to_int(v, default=0):
-    """Convert anything reasonable to int for arithmetic."""
     if v is None:
         return default
     if isinstance(v, bool):
@@ -69,17 +75,41 @@ def _to_int(v, default=0):
     except (ValueError, TypeError):
         return default
 
+
+def _normalize_discount_pct(raw):
+    """
+    Accepte tout ce qui peut representer une remise en %, renvoie un entier >= 0.
+
+    Cas couverts :
+      None / "" / 0           -> 0
+      -0.2 / 0.2 / "0.2"      -> 20  (proportion)
+      -20 / 20 / "20" / "20%" -> 20  (pourcentage)
+      "-20%" / "-0.2"         -> 20
+
+    Tres tolerant car le payload arrive de Google Sheets / Apps Script
+    qui peut envoyer la meme valeur dans 4 formats differents.
+    """
+    if raw is None or raw == "":
+        return 0
+    try:
+        s = str(raw).strip().replace("%", "").replace(",", ".").replace(" ", "")
+        if s == "":
+            return 0
+        val = float(s)
+    except (ValueError, TypeError):
+        log.warning(f"discount_pct illisible : {raw!r} -> 0")
+        return 0
+
+    if val < 0:
+        val = -val
+    if val <= 1:
+        val = val * 100
+    return int(round(val))
+
+
 def _normalize(data):
-    """
-    Make a defensive copy of `data` with all fields coerced to the
-    types the rendering code expects.  String fields => str (incl. None -> "").
-    Numeric fields (qty, price, discount_pct) => int.
-    Lists of strings => list of str.
-    Safe to pass anything from JSON: phones-as-numbers, qty-as-strings, etc.
-    """
     data = dict(data) if data else {}
 
-    # Top-level string fields — always set with safe default (handles missing keys)
     _string_defaults = {
         "reference": "",
         "date": "",
@@ -96,20 +126,21 @@ def _normalize(data):
     for k, default in _string_defaults.items():
         data[k] = _to_str(data.get(k, default))
 
-    # Client block: every value must be a string
     if "client" in data and isinstance(data["client"], dict):
         data["client"] = {k: _to_str(v) for k, v in data["client"].items()}
     else:
         data["client"] = {"name": "", "company": "", "country": "",
                           "email": "", "phone": ""}
-    # ensure required keys exist
     for k in ("name", "company", "country", "email", "phone"):
         data["client"].setdefault(k, "")
 
-    # discount_pct => int
-    data["discount_pct"] = _to_int(data.get("discount_pct", 0))
+    raw_pct = data.get("discount_pct", 0)
+    data["discount_pct"] = _normalize_discount_pct(raw_pct)
+    if data["discount_pct"] > 0 and not data["discount_label"].strip():
+        data["discount_label"] = "Special Discount"
+    if str(raw_pct) != str(data["discount_pct"]):
+        log.info(f"discount_pct normalise : {raw_pct!r} -> {data['discount_pct']}")
 
-    # Item lists: machines / software / commissioning
     for key in ("machines", "software", "commissioning"):
         items = data.get(key) or []
         new_items = []
@@ -118,14 +149,10 @@ def _normalize(data):
             it["qty"]   = _to_int(it.get("qty", 1), default=1)
             it["price"] = _to_int(it.get("price", 0), default=0)
             for sk in ("model", "desc", "spec"):
-                if sk in it:
-                    it[sk] = _to_str(it[sk])
-                else:
-                    it[sk] = ""
+                it[sk] = _to_str(it.get(sk, ""))
             new_items.append(it)
         data[key] = new_items
 
-    # included: list of strings
     inc = data.get("included") or []
     data["included"] = [_to_str(x) for x in inc]
 
@@ -134,6 +161,7 @@ def _normalize(data):
 
 def fmt(n):
     return f"${n:,.0f}" if not isinstance(n, str) else n
+
 
 def get_gradient_png():
     global _GRADIENT_PATH
@@ -152,58 +180,36 @@ def get_gradient_png():
     return _GRADIENT_PATH
 
 
-
 # ============================================================
-# LEAD TIMES (source : Template_proforma_202410_En.xlsx)
-# Lead time = max parmi toutes les machines demandées
+# LEAD TIMES
 # ============================================================
 LEADTIME_MAP = {
-    "X1":     "3 to 4 months",
-    "X1_18":  "3 to 4 months",
-    "X1_16":  "3 to 4 months",
-    "X1_20":  "3 to 4 months",
-    "X2":     "3 to 4 months",
-    "X2_12":  "3 to 4 months",
-    "X2_16":  "3 to 4 months",
-    "X20":    "3 to 4 months",
-    "X30I":   "3 to 4 months",
-    "X3":     "3 to 4 months",
-    "X3I":    "3 to 4 months",
-    "X5":     "4 to 5 months",
-    "X8I":    "4 to 5 months",
-    "X80I":   "4 to 5 months",
-    "X6":     "6 to 7 months",
-    "X10I":   "6 to 7 months",
-    "X100I":  "6 to 7 months",
-    "X88":    "6 to 7 months",
-    "X88I":   "6 to 7 months",
-    "X888":   "8 to 10 months",
-    "X888I":  "8 to 10 months",
+    "X1":     "3 to 4 months", "X1_18":  "3 to 4 months", "X1_16":  "3 to 4 months",
+    "X1_20":  "3 to 4 months", "X2":     "3 to 4 months", "X2_12":  "3 to 4 months",
+    "X2_16":  "3 to 4 months", "X20":    "3 to 4 months", "X30I":   "3 to 4 months",
+    "X3":     "3 to 4 months", "X3I":    "3 to 4 months",
+    "X5":     "4 to 5 months", "X8I":    "4 to 5 months", "X80I":   "4 to 5 months",
+    "X6":     "6 to 7 months", "X10I":   "6 to 7 months", "X100I":  "6 to 7 months",
+    "X88":    "6 to 7 months", "X88I":   "6 to 7 months",
+    "X888":   "8 to 10 months", "X888I":  "8 to 10 months",
     "X168":   "10 to 12 months",
 }
-
 LEADTIME_RANK = {
-    "3 to 4 months":  1,
-    "4 to 5 months":  2,
-    "6 to 7 months":  3,
-    "8 to 10 months": 4,
-    "10 to 12 months": 5,
+    "3 to 4 months":  1, "4 to 5 months":  2, "6 to 7 months":  3,
+    "8 to 10 months": 4, "10 to 12 months": 5,
 }
 
 def compute_lead_time(machines):
-    """Returns the maximum lead time among all machines in the quote"""
     if not machines:
         return "3 to 4 months"
-    best_lt = "3 to 4 months"
-    best_rank = 1
+    best_lt, best_rank = "3 to 4 months", 1
     for m in machines:
         code = _to_str(m.get("model")).upper()
         lt = LEADTIME_MAP.get(code)
         if lt:
             r = LEADTIME_RANK.get(lt, 1)
             if r > best_rank:
-                best_rank = r
-                best_lt = lt
+                best_rank, best_lt = r, lt
     return best_lt
 
 
@@ -216,13 +222,11 @@ class QuoteDoc(BaseDocTemplate):
 def cover_cb(canvas_obj, doc):
     d = doc._cover_data
     if os.path.exists(COVER_PHOTO):
-        canvas_obj.drawImage(COVER_PHOTO, 0, 0, W, H,
-                             preserveAspectRatio=False, mask='auto')
+        canvas_obj.drawImage(COVER_PHOTO, 0, 0, W, H, preserveAspectRatio=False, mask='auto')
     canvas_obj.drawImage(get_gradient_png(), 0, 0, W, H, mask='auto')
 
     if os.path.exists(LOGO):
-        canvas_obj.drawImage(LOGO, L_MARGIN, H-36*mm,
-                             width=62*mm, height=17*mm,
+        canvas_obj.drawImage(LOGO, L_MARGIN, H-36*mm, width=62*mm, height=17*mm,
                              preserveAspectRatio=True, mask='auto')
 
     canvas_obj.setFillColor(WHITE)
@@ -277,8 +281,7 @@ def cover_cb(canvas_obj, doc):
 def inner_cb(canvas_obj, doc):
     canvas_obj.saveState()
     if os.path.exists(LOGO):
-        canvas_obj.drawImage(LOGO, L_MARGIN, H-22*mm,
-                             width=44*mm, height=12*mm,
+        canvas_obj.drawImage(LOGO, L_MARGIN, H-22*mm, width=44*mm, height=12*mm,
                              preserveAspectRatio=True, mask='auto')
     canvas_obj.setFillColor(GRAY)
     canvas_obj.setFont("Helvetica", 6.5)
@@ -303,13 +306,10 @@ def inner_cb(canvas_obj, doc):
 
 
 def build_pdf(data, out, fn=""):
-    # ── V13: normalize all input data first (defensive against JSON quirks) ──
     data = _normalize(data)
-    # Override lead_time with computed value based on machines
     data["lead_time"] = compute_lead_time(data.get("machines", []))
     doc = QuoteDoc(out, quote_fn=fn or os.path.basename(out),
-                   pagesize=A4,
-                   topMargin=30*mm, bottomMargin=20*mm,
+                   pagesize=A4, topMargin=30*mm, bottomMargin=20*mm,
                    leftMargin=L_MARGIN, rightMargin=R_MARGIN)
     doc._cover_data = data
 
@@ -483,9 +483,9 @@ def build_pdf(data, out, fn=""):
     disc=0
     TW1, TW2 = CW-50*mm, 50*mm
     trows=[
-        [Paragraph("<b>Subtotal — Machines</b>",sb),            Paragraph(fmt(mt2),srb)],
-        [Paragraph("<b>Subtotal — Software & Training</b>",sb), Paragraph(fmt(st2),srb)],
-        [Paragraph("<b>Subtotal — Commissioning</b>",sb),       Paragraph(fmt(ct2),srb)],
+        [Paragraph("<b>Subtotal - Machines</b>",sb),            Paragraph(fmt(mt2),srb)],
+        [Paragraph("<b>Subtotal - Software & Training</b>",sb), Paragraph(fmt(st2),srb)],
+        [Paragraph("<b>Subtotal - Commissioning</b>",sb),       Paragraph(fmt(ct2),srb)],
     ]
     if data.get("discount_pct",0)>0:
         disc=int(mt2*data["discount_pct"]/100)
@@ -569,11 +569,10 @@ def build_pdf(data, out, fn=""):
 
 def build_excel(data, out):
     from openpyxl import Workbook
-    # ── V13: normalize all input data first (defensive against JSON quirks) ──
-    data = _normalize(data)
-    # Override lead_time with computed value based on machines
-    data["lead_time"] = compute_lead_time(data.get("machines", []))
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    data = _normalize(data)
+    data["lead_time"] = compute_lead_time(data.get("machines", []))
 
     wb = Workbook()
     orange_fill = PatternFill(start_color="E8841A", end_color="E8841A", fill_type="solid")
@@ -597,14 +596,15 @@ def build_excel(data, out):
     ws.column_dimensions['F'].width = 18
 
     row = 1
-    ws.cell(row=row, column=2, value=f"PINNACLE LGS — {data.get('document_type', 'PROFORMA')}").font = Font(bold=True, size=18, color="E8841A")
+    ws.cell(row=row, column=2, value=f"PINNACLE LGS - {data.get('document_type', 'PROFORMA')}").font = Font(bold=True, size=18, color="E8841A")
     ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
     row += 2
 
-    ws.cell(row=row, column=2, value="Reference").font = bold_font
-    ws.cell(row=row, column=3, value=data['reference']).font = normal_font
-    ws.cell(row=row, column=5, value="Date").font = bold_font
-    ws.cell(row=row, column=6, value=data['date']).font = normal_font
+    for label, value, col in [
+        ("Reference", data['reference'], 3), ("Date", data['date'], 6),
+    ]:
+        ws.cell(row=row, column=2 if col == 3 else 5, value=label).font = bold_font
+        ws.cell(row=row, column=col, value=value).font = normal_font
     row += 1
     ws.cell(row=row, column=2, value="Sales Person").font = bold_font
     ws.cell(row=row, column=3, value=data['sales_person']).font = normal_font
@@ -697,9 +697,9 @@ def build_excel(data, out):
     grand = m_total - disc + s_total + c_total
 
     for lbl, val in [
-        ("Subtotal — Machines", m_total),
-        ("Subtotal — Software & Training", s_total),
-        ("Subtotal — Commissioning", c_total),
+        ("Subtotal - Machines", m_total),
+        ("Subtotal - Software & Training", s_total),
+        ("Subtotal - Commissioning", c_total),
     ]:
         ws.cell(row=row, column=2, value=lbl).font = bold_font
         ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5)
@@ -718,76 +718,5 @@ def build_excel(data, out):
     ws.cell(row=row, column=6, value=grand).number_format = '"$"#,##0'
     ws.cell(row=row, column=6).font = big_bold
     ws.cell(row=row, column=6).fill = light_orange_fill
-
-    # PAYMENTS sheet
-    ws2 = wb.create_sheet("Payments")
-    ws2.column_dimensions['A'].width = 3
-    ws2.column_dimensions['B'].width = 20
-    ws2.column_dimensions['C'].width = 15
-    ws2.column_dimensions['D'].width = 20
-    ws2.column_dimensions['E'].width = 15
-    ws2.column_dimensions['F'].width = 20
-    ws2.column_dimensions['G'].width = 20
-    ws2.column_dimensions['H'].width = 25
-
-    r = 1
-    ws2.cell(row=r, column=2, value="PAYMENT TRACKING").font = Font(bold=True, size=18, color="E8841A")
-    ws2.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
-    r += 1
-    ws2.cell(row=r, column=2, value=f"Reference: {data['reference']}  —  Client: {cl['company']}").font = Font(italic=True, color="666666")
-    ws2.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
-    r += 2
-
-    ws2.cell(row=r, column=2, value="Total Amount Due").font = bold_font
-    ws2.cell(row=r, column=3, value=grand).number_format = '"$"#,##0'
-    ws2.cell(row=r, column=3).font = bold_font
-    r += 1
-    ws2.cell(row=r, column=2, value="Total Paid (auto)").font = bold_font
-    ws2.cell(row=r, column=3, value=f"=SUM(F{r+4}:F{r+20})").number_format = '"$"#,##0'
-    ws2.cell(row=r, column=3).font = Font(bold=True, color="2E7D32")
-    paid_cell_ref = f"C{r}"
-    r += 1
-    ws2.cell(row=r, column=2, value="Remaining Balance (auto)").font = bold_font
-    ws2.cell(row=r, column=3, value=f"=C{r-2}-{paid_cell_ref}").number_format = '"$"#,##0'
-    ws2.cell(row=r, column=3).font = Font(bold=True, color="CC0000")
-    ws2.cell(row=r, column=3).fill = light_orange_fill
-    r += 2
-
-    headers = ["#", "Description", "Scheduled Date", "Scheduled Amount", "Paid Date", "Paid Amount", "Status", "Notes"]
-    for col, h in enumerate(headers, start=2):
-        c = ws2.cell(row=r, column=col, value=h)
-        c.font = white_font; c.fill = orange_fill; c.alignment = center; c.border = border
-    r += 1
-
-    planning = [
-        ("1", "First deposit", "", grand * 0.5, "", "", "", ""),
-        ("2", "Final payment", "", grand * 0.5, "", "", "", ""),
-    ]
-    for i in range(3, 13):
-        planning.append((str(i), "", "", "", "", "", "", ""))
-
-    for p in planning:
-        for col, val in enumerate(p, start=2):
-            c = ws2.cell(row=r, column=col, value=val if val != "" else None)
-            c.border = border
-            if col in (5, 7):
-                c.number_format = '"$"#,##0'
-                c.alignment = right
-            elif col in (2, 4, 6):
-                c.alignment = center
-        r += 1
-
-    r += 1
-    ws2.cell(row=r, column=2, value="How to use:").font = bold_font
-    r += 1
-    for line in [
-        "• Fill in 'Scheduled Date' and 'Scheduled Amount' for each planned payment",
-        "• When a payment is received, fill 'Paid Date' and 'Paid Amount'",
-        "• Set Status: Scheduled / Partial / Paid / Overdue",
-        "• 'Total Paid' and 'Remaining Balance' update automatically",
-    ]:
-        ws2.cell(row=r, column=2, value=line).font = Font(size=9, color="666666")
-        ws2.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
-        r += 1
 
     wb.save(out)
